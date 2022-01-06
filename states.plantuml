@@ -1,0 +1,22 @@
+@startuml
+[*] --> Starting
+Starting : ESP bootet, Verbindung zu WLAN und mDNS wird hergestellt
+Starting : WebServer wartet auf initialen Aufruf
+
+state "Device Authorization Request" as DeviceAuthRequest
+DeviceAuthRequest: User Code und Device Code für das Login abrufen und auf der HTML Seite anzeigen
+
+Starting -> DeviceAuthRequest : ESP via WebServer aufgerufen
+
+state "Device Access Token Request" as DeviceAccessTokenRequest
+DeviceAuthRequest --> DeviceAccessTokenRequest
+DeviceAccessTokenRequest --> DeviceAccessTokenRequest : wiederholen bis Token vorhanden
+DeviceAccessTokenRequest --> PresenceLoop : Token vorhanden
+
+
+state "Get presense status for user" as PresenceLoop
+PresenceLoop: 'Presence' abfragen und LED aktualisieren und access_token aktualisieren
+PresenceLoop --> PresenceLoop : jede Sekunde wiederholen
+
+PresenceLoop --> [*]
+@enduml
