@@ -5,9 +5,13 @@
 #include <WiFiClientSecureBearSSL.h>
 #include <ArduinoJson.h>
 #include <FS.h>
+#include <Adafruit_NeoPixel.h>
 #include "Credentials.h"
 
-#define SSID  "BSHome" //"Solar Dynamics"
+#define CLIENT_ID "<client_id>"
+#define TENANT "<tenant>"
+#define WIFI_PASSWORD "<wifi-password>"
+#define SSID "<wifi-ssid>"
 
 ESP8266WebServer server(80);
 HTTPClient https;
@@ -19,9 +23,10 @@ std::unique_ptr<BearSSL::WiFiClientSecure>client(new BearSSL::WiFiClientSecure);
 #define DEVICE_TOKEN_REQUEST 3
 #define AUTHENICATED 4
 
-#define RED D7
-#define YELLOW D6
-#define GREEN D5
+#define PIN D7 // Hier wird angegeben, an welchem digitalen Pin die WS2812 LEDs bzw. NeoPixel angeschlossen sind
+#define NUMPIXELS 60 // Hier wird die Anzahl der angeschlossenen WS2812 LEDs bzw. NeoPixel angegeben
+
+Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
 
 volatile int current_state = 0;
 char device_code[207];
@@ -29,8 +34,7 @@ DynamicJsonDocument token(6144);
 
 bool debug = false;
 
-void setup()
-{
+void setup() {
   Serial.begin(115200);
   Serial.println();
   setup_filesystem();
@@ -38,15 +42,10 @@ void setup()
   setup_webserver();
 
   client->setInsecure();
-
-  pinMode(RED, OUTPUT);
-  pinMode(YELLOW, OUTPUT);
-  pinMode(GREEN, OUTPUT);
+  pixels.begin();
 }
 
-void setup_wifi()
-{
-
+void setup_wifi() {
   delay(10);
   // We start by connecting to a WiFi network
   Serial.println();
@@ -72,14 +71,13 @@ void setup_wifi()
       Serial.println("mDNS started: call-status-indicator.local");
     }
   }
-
 }
 
-void setup_webserver()
-{
+void setup_webserver() {
   Serial.println("Starting Webserver setup.");
   server.serveStatic("/static/", SPIFFS, "/static/");
   server.on("/", handleRootPath);
+  server.on("/index.html", handleRootPath);
   server.begin();
   Serial.println("Server listening...");
 }
@@ -100,29 +98,38 @@ void debug_payload(String payload) {
   }
 }
 
-void handleRootPath()
-{
-  if (current_state == STARTING)
-  {
+void handleRootPath() {
+  String index = "";
+  File file = SPIFFS.open("/index.html", "r");
+  while (file.available()) {
+    index.concat(file.readStringUntil('\n'));
+  }
+  file.close();
+
+  if (current_state == STARTING || current_state == DEVICE_TOKEN_REQUEST) {
     DynamicJsonDocument doc(768);
     device_authorization_request(doc);
     if (!doc.isNull()) {
-      server.send(200, "text/plain", doc["message"].as<String>());
+      String message = "To sign in, use a web browser to open the page <a target=\"_blank\" href=\"https://microsoft.com/devicelogin\">https://microsoft.com/devicelogin</a> and enter the code <em>%code%</em> to authenticate.";
+      message.replace("%code%", doc["user_code"].as<String>());
+      index.replace("%message%", message);
+      server.send(200, "text/html", index);
       current_state = DEVICE_TOKEN_REQUEST;
     } else {
-      server.send(200, "text/plain", "Konnte 'devicecode' flow nicht starten.");
+      index.replace("%message%", "Konnte 'devicecode' flow nicht starten.");
+      server.send(200, "text/html", index);
     }
   }
 
   if (current_state == AUTHENICATED) {
-    server.send(200, "text/plain", "ESP8266 ist authentifiziert.");
+    index.replace("%message%", "ESP8266 ist authentifiziert.");
+    server.send(200, "text/html", index);
+
   }
 }
 
 void reset_indicator() {
-  digitalWrite(RED, LOW);
-  digitalWrite(YELLOW, LOW);
-  digitalWrite(GREEN, LOW);
+  pixels.clear();
 }
 
 void presence_loop(JsonDocument &doc) {
@@ -143,17 +150,17 @@ void presence_loop(JsonDocument &doc) {
         Serial.printf("Activity: %s\n", activity);
         if (activity.equalsIgnoreCase("InACall")) {
           reset_indicator();
-          digitalWrite(RED, HIGH);
+          onAir();
         } else if (activity.equalsIgnoreCase("Available")) {
           reset_indicator();
-          digitalWrite(GREEN, HIGH);
+          available();
         } else if (activity.equalsIgnoreCase("Offline")) {
           reset_indicator();
-          digitalWrite(YELLOW, HIGH);
+          offline();
         }
       }
     } else {
-      Serial.printf("[HTTP] GET... failed, error: %s\n", https.errorToString(httpCode).c_str());
+      Serial.printf("[HTTP] GET /beta/me/presence failed, error: %s\n", https.errorToString(httpCode).c_str());
     }
   }
 }
@@ -188,7 +195,7 @@ void token_request(JsonDocument &doc) {
     body.concat(device_code);
     body.concat("&client_id=");
     body.concat(CLIENT_ID);
-    
+
     int httpCode = https.POST(body);
     if (httpCode > 0) {
       Serial.printf("[HTTP] POST (token_request)... code: %d\n", httpCode);
@@ -216,7 +223,7 @@ void token_refresh_request(JsonDocument &doc) {
     body.concat(doc["refresh_token"].as<String>());
     body.concat("&client_id=");
     body.concat(CLIENT_ID);
-    
+
     int httpCode = https.POST(body);
     if (httpCode > 0) {
       Serial.printf("[HTTP] POST (token_refresh_request)... code: %d\n", httpCode);
@@ -235,37 +242,50 @@ void token_refresh_request(JsonDocument &doc) {
   }
 }
 
-
-
 void startup_check(JsonDocument &doc)
 {
   File token = SPIFFS.open("token.json", "r");
   deserializeJson(doc, token);
   if (!doc.isNull()) {
-    nominal();
+    available();
     current_state = REFRESH_TOKEN;
   } else {
     error();
   }
 }
 
-void nominal() {
-  for (int i = 0; i < 3; i++) {
-    Serial.println("Blink");
-    digitalWrite(GREEN, HIGH);
-    delay(500);
-    digitalWrite(GREEN, LOW);
-    delay(500);
-  }
+void onAir() {
+  pixels.fill(pixels.Color(220, 0, 0) , 0 , NUMPIXELS);
+  pixels.show();
+}
+
+void available() {
+  pixels.fill(pixels.Color(0, 220, 0) , 0 , NUMPIXELS);
+  pixels.show();
+  delay (100);
+}
+
+void offline() {
+  pixels.fill(pixels.Color(220, 220, 0) , 0 , NUMPIXELS);
+  pixels.show();
+  delay (100);
 }
 
 void error() {
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(RED, HIGH);
-    delay(500);
-    digitalWrite(RED, LOW);
-    delay(500);
+  for (int i = 0; i < NUMPIXELS; i = i + 2) {
+    pixels.setPixelColor(i, pixels.Color(220, 0, 0));
   }
+  pixels.show();
+  delay (100);
+  pixels.clear();
+
+  for (int i = 1; i < NUMPIXELS; i = i + 2) {
+    pixels.setPixelColor(i, pixels.Color(220, 0, 0));
+  }
+  pixels.show();
+  delay (100);
+
+  pixels.clear();
 }
 
 
